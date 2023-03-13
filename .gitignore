@@ -1,0 +1,18 @@
+
+# Latex
+*.aux
+*latexmk
+*.log
+*.fls
+*.synctex*
+*.pdf
+*.png
+*.bbl
+*.blg
+*.toc
+*.brf
+*.out
+
+# Vscode
+c_cpp_properties.json
+.vscode
