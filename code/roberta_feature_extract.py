@@ -90,6 +90,8 @@ train_encoded.set_format("torch", columns=["input_ids", "attention_mask",
 train_hidden = train_encoded.map(extract_hidden_states, batched=True)
 val_hidden = val_encoded.map(extract_hidden_states, batched=True)
 
+torch.save(train_hidden, 'train_hidden.pt')
+torch.save(val_hidden, 'val_hidden.pt')
 
 X_train = np.array(train_hidden["hidden_state"])
 X_valid = np.array(val_hidden["hidden_state"])
