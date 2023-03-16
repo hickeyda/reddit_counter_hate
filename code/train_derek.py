@@ -16,6 +16,8 @@ from transformers import AutoModel, AdamW, get_cosine_schedule_with_warmup
 import torch.nn as nn
 import math
 
+import torchmetrics as tm
+
 import numpy as np
 from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score
 
@@ -51,9 +53,10 @@ class HS_Dataset(Dataset):
 
   def __getitem__(self, index):
     item = self.data.iloc[index]
-    sent = str(item.context + ' [SEP] ' + item.target)
-    attributes = F.one_hot(torch.tensor(item.label), num_classes=2).squeeze().type(torch.FloatTensor)
-    tokens = self.tokenizer.encode_plus(sent,
+    sent = item.context
+    sent_pair = item.target
+    attributes = F.one_hot(torch.tensor(item.label), num_classes=2).squeeze().type(torch.FloatTensor) # CHANGE CLASS IF DOING MULTILABEL HERE
+    tokens = self.tokenizer.encode_plus(sent, sent_pair,
                                         add_special_tokens=True,
                                         return_tensors='pt',
                                         truncation=True,
@@ -65,10 +68,11 @@ class HS_Dataset(Dataset):
 
 
 class HS_Data_Module(pl.LightningDataModule):
-  def __init__(self, train_data, val_data, batch_size = 16, max_token_len=512, model_name='roberta_base'):
+  def __init__(self, train_data, val_data, test_data, batch_size = 16, max_token_len=512, model_name='roberta_base'):
     super().__init__()
     self.train_data = train_data
     self.val_data = val_data
+    self.test_data = test_data
     self.batch_size = batch_size
     self.max_token_len = max_token_len
     self.model_name = model_name
@@ -76,19 +80,19 @@ class HS_Data_Module(pl.LightningDataModule):
 
   def setup(self, stage = None):
     if stage in (None, 'fit'):
-      self.train_dataset = HS_Dataset(self.train_data, self.tokenizer)
-      self.val_dataset = HS_Dataset(self.val_data, self.tokenizer)
-    if stage == 'predict': # CHANGE TO TEST DATA
-      self.val_dataset = HS_Dataset(self.val_data, self.tokenizer)
+      self.train_dataset = HS_Dataset(self.train_data, self.tokenizer, sample_size = None)
+      self.val_dataset = HS_Dataset(self.val_data, self.tokenizer, sample_size = None)
+    if stage == 'predict':
+      self.test_dataset = HS_Dataset(self.test_data, self.tokenizer, sample_size = None)
 
   def train_dataloader(self):
-    return DataLoader(self.train_dataset, batch_size=self.batch_size, num_workers=1, shuffle=True)
+    return DataLoader(self.train_dataset, batch_size=self.batch_size, num_workers=12, shuffle=True)
 
   def val_dataloader(self):
-    return DataLoader(self.val_dataset, batch_size=self.batch_size, num_workers=1, shuffle=False)
+    return DataLoader(self.val_dataset, batch_size=self.batch_size, num_workers=12, shuffle=False)
 
-  def predict_dataloader(self): # CHANGE TO TEST DATA
-    return DataLoader(self.val_dataset, batch_size=self.batch_size, num_workers=1, shuffle=False)
+  def predict_dataloader(self):
+    return DataLoader(self.test_dataset, batch_size=self.batch_size, num_workers=12, shuffle=False)
 
 
 class HS_Classifier(pl.LightningModule):
@@ -118,12 +122,38 @@ class HS_Classifier(pl.LightningModule):
 
   def training_step(self, batch, batch_idx):
     loss, logits = self(**batch)
-    self.log('train loss', loss, prog_bar = True, logger=True)
+    self.log('Train Loss', loss, prog_bar = True, logger=True)
+
+    # Get Train Accuracy
+    self.train_acc.update(logits, batch['labels'])
+    self.log('Train Acc', self.train_acc, on_step=True, on_epoch=True, prog_bar=True, logger=True)
+
+    # Get Train F1
+    self.train_f1.update(logits, batch['labels'])
+    self.log('Train F1', self.train_f1, on_step=True, on_epoch=True, logger=True)
+
+    # Get Train AUROC
+    self.train_auroc.update(logits, batch['labels'])
+    self.log('Train AUROC', self.train_auroc, on_step=True, on_epoch=True, logger=True)
+
     return {"loss": loss, "predictions": logits, "labels": batch['labels']}
 
   def validation_step(self, batch, batch_idx):
     loss, logits = self(**batch)
-    self.log('val loss', loss, prog_bar = True, logger=True)
+    self.log('Val Loss', loss, prog_bar = True, logger=True)
+
+    # Get Val Accuracy
+    self.val_acc.update(logits, batch['labels'])
+    self.log('Val Acc', self.val_acc, on_step=True, on_epoch=True, prog_bar=True, logger=True)
+
+    # Get Val F1
+    self.val_f1.update(logits, batch['labels'])
+    self.log('Val F1', self.val_f1, on_step=True, on_epoch=True, logger=True)
+
+    # Get Val AUROC
+    self.val_auroc.update(logits, batch['labels'])
+    self.log('Val AUROC', self.val_auroc, on_step=True, on_epoch=True, logger=True)
+
     return {"loss": loss, "predictions": logits, "labels": batch['labels']}
 
   def predict_step(self, batch, batch_idx):
@@ -131,7 +161,7 @@ class HS_Classifier(pl.LightningModule):
     return logits
 
   def configure_optimizers(self):
-    optimzer = AdamW(self.parameters(), lr=self.config['lr'], weight_decay=self.config['w_decay'])
+    optimzer = torch.optim.Adam(self.parameters(), lr=self.config['lr'], weight_decay=self.config['w_decay'])
     total_steps = self.config['train_size'] / self.config['batch_size']
     warmup_steps = math.floor(total_steps *  self.config['warmup'])
     scheduler = get_cosine_schedule_with_warmup(optimzer, warmup_steps, total_steps)
@@ -157,15 +187,18 @@ def main():
     val_df = pd.concat([val_gold_df, val_silver_df])
     val_df['label'] = val_df['label'].apply(binarize_label).values
 
+    # Set batch size (needed for data module and config)
+    b_size = 64
+
     # Create data set
-    hs_data_module = HS_Data_Module(train_df, val_df, batch_size = 64) # CHANGE BATCH SIZE HERE AND IN CONFIG
+    hs_data_module = HS_Data_Module(train_df, val_df, test_df, batch_size = b_size)
     hs_data_module.setup()
 
     # Config
     config = {
         'model_name': 'roberta-base',
         'n_labels': 2,
-        'batch_size': 64,
+        'batch_size': b_size,
         'lr': 1.5e-6,
         'w_decay': 0.001,
         'train_size': len(hs_data_module.train_dataloader()),
@@ -176,20 +209,21 @@ def main():
     # Model
     model = HS_Classifier(config)
 
+    # Early Stopping (based on validation loss not decreasing)
+    early_stop_callback = pl.callbacks.EarlyStopping(monitor='Val Loss', patience=5, min_delta=0.0005, verbose=True, mode='min')
+
     # Train
-    trainer = pl.Trainer(max_epochs=config['n_epochs'], 
-                        gpus=1, 
+    trainer = pl.Trainer(max_epochs=config['n_epochs'],
+                        callbacks=[early_stop_callback],
                         num_sanity_val_steps=50)
 
     trainer.fit(model, hs_data_module)
 
-    v_preds = get_preds(model, hs_data_module)
-    val_y = [int(x) for x in val_df['label'].values]
-    val_preds = torch.argmax(v_preds, dim=1).numpy()
-    print("Val Accuracy:", accuracy_score(val_y, val_preds))
-    print("Val F1:", f1_score(val_y, val_preds, average='weighted'))
-    print("Val Recall:", recall_score(val_y, val_preds, average='weighted'))
-    print("Val Precision:", precision_score(val_y, val_preds, average='weighted'))
+    y_pred_probs = get_preds(model, hs_data_module)
+    y_preds = torch.argmax(y_pred_probs, 1).numpy()
+    y_true = test_df.label.values
+
+    return
 
 if __name__ == "__main__":
     main() # CODE MAINLY COMES FROM: https://www.youtube.com/watch?v=vNKIg8rXK6w
