@@ -33,11 +33,11 @@ def yuetal_data_preprocess(gold_data_path, silver_data_path):
     # Combine context and target
     contexts = df['context'].values
     targets = df['target'].values
-    df['text'] = list(map(lambda x,y: str(x) + ' [SEP] ' + str(y), contexts, targets))
+    df['text'] = list(map(lambda x,y: str(x) + ' </s> ' + str(y), contexts, targets))
     df = df.drop(columns=['context', 'target'])
     
     # Binarize and cast label to int
-    df['label'] = list(map(lambda x: 0 if int(x) == 1 else int(x), df['label']))
+    df['label'] = list(map(lambda x: 0 if int(x) == 1 or int(x) == 0 else 1, df['label']))
     
     return df
 
