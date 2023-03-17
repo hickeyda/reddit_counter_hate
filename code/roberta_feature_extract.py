@@ -1,8 +1,10 @@
-from preprocess_data import yuetal_data_preprocess
+from helper import yuetal_data_preprocess, extract_hidden_states, upsample, tokenize
+
 from datasets import Dataset
 import pandas as pd
 import torch
 import numpy as np
+import os
 
 from transformers import AutoModel, RobertaTokenizer
 
@@ -26,12 +28,6 @@ def extract_hidden_states(batch):
     # Return vector for [CLS] token
     return {"hidden_state": last_hidden_state[:,0].cpu().numpy()}
 
-def tokenize(batch):
-    return tokenizer(batch["text"], 
-                     padding=True, 
-                     truncation=True, 
-                     add_special_tokens = True)
-
 def lr_classifier(train_hidden, val_hidden):
     X_train = np.array(train_hidden["hidden_state"])
     X_valid = np.array(val_hidden["hidden_state"])
@@ -45,33 +41,39 @@ def lr_classifier(train_hidden, val_hidden):
     print("Validation Accuracy = ", lr_clf.score(X_valid, y_valid))
 
 def main():
-    if RETRAIN:
+    if RETRAIN == False and \
+        (os.path.exists("./train_hidden.pt") and os.path.exists("./val_hidden.pt")):
+        train_hidden = torch.load("train_hidden.pt")
+        val_hidden = torch.load("val_hidden.pt")
+    else:
         train_df = yuetal_data_preprocess(YU_DATA_PATH + '/gold/train.jsonl', 
                                         YU_DATA_PATH + '/silver/train.jsonl')
         val_df = yuetal_data_preprocess(YU_DATA_PATH + '/gold/val.jsonl', 
                                         YU_DATA_PATH + '/silver/val.jsonl')
 
+        train_df = upsample(train_df)
+        
         train_ds = Dataset.from_pandas(train_df)
         val_ds = Dataset.from_pandas(val_df)
-        
         
         train_encoded = train_ds.map(tokenize, batched=True, batch_size=None)
         val_encoded = val_ds.map(tokenize, batched=True, batch_size=None)
         
+        # Save the hidden state
+        torch.save(train_encoded, "train_encoded.pt")
+        torch.save(val_encoded, "val_encoded.pt")
+        
         train_encoded.set_format("torch", columns=["input_ids", "attention_mask", 
-                                            "label"])
+                                                "label"])
         val_encoded.set_format("torch", columns=["input_ids", "attention_mask", 
                                                 "label"])
         
-        train_hidden = train_encoded.map(extract_hidden_states, batched=True, batch_size=16)
-        val_hidden = val_encoded.map(extract_hidden_states, batched=True, batch_size=16)
+        train_hidden = train_encoded.map(extract_hidden_states, batched=True, batch_size=32)
+        val_hidden = val_encoded.map(extract_hidden_states, batched=True, batch_size=32)
 
         # Save the hidden state
         torch.save(train_hidden, "train_hidden.pt")
         torch.save(val_hidden, "val_hidden.pt")
-    else:
-        train_hidden = torch.load("train_hidden.pt")
-        val_hidden = torch.load("val_hidden.pt")
 
     print("------------------- Training -------------------")
     lr_classifier(train_hidden, val_hidden)

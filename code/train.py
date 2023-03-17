@@ -12,7 +12,7 @@ from transformers import AutoModelForSequenceClassification
 from transformers import Trainer
 from sklearn.metrics import accuracy_score, f1_score
 
-from helper import yuetal_data_preprocess, extract_hidden_states
+from helper import yuetal_data_preprocess, extract_hidden_states, upsample, tokenize
 
 def load_data_file(path):
     lines_list = []
@@ -24,11 +24,6 @@ def load_data_file(path):
     
     return df
 
-tokenizer = RobertaTokenizer.from_pretrained('roberta-base')
-def tokenize(batch):
-    return tokenizer(batch["text"], padding=True, truncation=True, add_special_tokens = True)
-
-
 def compute_metrics(pred):
     labels = pred.label_ids
     preds = pred.predictions.argmax(-1)
@@ -38,47 +33,45 @@ def compute_metrics(pred):
 
 DEV = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 YU_DATA_PATH = '../reference/counter_context/data'
-RETRAIN = False
+RETRAIN = True
 
 def main():
     if RETRAIN == False and \
-        (os.path.exists("./train_hidden.pt") and os.path.exists("./val_hidden.pt")):
-        train_hidden = torch.load("train_hidden.pt")
-        val_hidden = torch.load("val_hidden.pt")
+        (os.path.exists("./train_encoded.pt") and os.path.exists("./val_encoded.pt")):
+        train_encoded = torch.load("train_encoded.pt")
+        val_encoded = torch.load("val_encoded.pt")
     else:
         train_df = yuetal_data_preprocess(YU_DATA_PATH + '/gold/train.jsonl', 
                                         YU_DATA_PATH + '/silver/train.jsonl')
         val_df = yuetal_data_preprocess(YU_DATA_PATH + '/gold/val.jsonl', 
                                         YU_DATA_PATH + '/silver/val.jsonl')
 
+        train_df = upsample(train_df)
+        
         train_ds = Dataset.from_pandas(train_df)
         val_ds = Dataset.from_pandas(val_df)
         
         train_encoded = train_ds.map(tokenize, batched=True, batch_size=None)
         val_encoded = val_ds.map(tokenize, batched=True, batch_size=None)
         
-        train_encoded.set_format("torch", columns=["input_ids", "attention_mask", 
-                                            "label"])
-        val_encoded.set_format("torch", columns=["input_ids", "attention_mask", 
-                                                "label"])
-        
-        train_hidden = train_encoded.map(extract_hidden_states, batched=True, batch_size=16)
-        val_hidden = val_encoded.map(extract_hidden_states, batched=True, batch_size=16)
-
         # Save the hidden state
-        torch.save(train_hidden, "train_hidden.pt")
-        torch.save(val_hidden, "val_hidden.pt")
+        torch.save(train_encoded, "train_encoded.pt")
+        torch.save(val_encoded, "val_encoded.pt")
     
+    train_encoded.set_format("torch", columns=["input_ids", "attention_mask", 
+                                            "label"])
+    val_encoded.set_format("torch", columns=["input_ids", "attention_mask", 
+                                            "label"])
+        
     model_ckpt = "roberta-base"
     model = AutoModelForSequenceClassification.from_pretrained("roberta-base", 
                                                             num_labels=2)
 
-    batch_size = 4
-    logging_steps = len(train_hidden) // batch_size
-    print(logging_steps)
+    batch_size = 64
+    logging_steps = len(train_encoded) // batch_size
     model_name = model_ckpt + "-finetune-2-class"
     training_args = TrainingArguments(output_dir=model_name,
-                                    num_train_epochs=2,
+                                    num_train_epochs=10,
                                     learning_rate=2e-5,
                                     per_device_train_batch_size=batch_size,
                                     per_device_eval_batch_size=batch_size,
@@ -92,9 +85,8 @@ def main():
 
     trainer = Trainer(model=model, args=training_args, 
                     compute_metrics=compute_metrics,
-                    train_dataset=train_hidden,
-                    eval_dataset=val_hidden,
-                    tokenizer=tokenizer)
+                    train_dataset=train_encoded,
+                    eval_dataset=val_encoded)
     
     print("------------------- Training -------------------")
     trainer.train()

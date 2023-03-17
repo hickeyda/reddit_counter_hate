@@ -5,6 +5,8 @@ import torch
 
 from transformers import AutoModel, RobertaTokenizer
 
+from sklearn.utils import resample
+
 DEV = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 MODEL_CKPT = "roberta-base"
 MODEL = AutoModel.from_pretrained(MODEL_CKPT, num_labels=2).to(DEV)
@@ -20,6 +22,29 @@ def load_data_file(path):
     
     return df
 
+def upsample(df):
+    # Separate majority and minority classes
+    majority_df = df[df['label']==0]
+    minority_df = df[df['label']==1]
+    
+    # Upsample minority class
+    upsampled_minority_df = resample(minority_df, 
+                                    replace=True,     # sample with replacement
+                                    n_samples=len(majority_df),    # to match majority class
+                                    random_state=123) # reproducible results
+    
+    return pd.concat([majority_df, upsampled_minority_df])
+
+def tokenize(batch):
+    return TOKENIZER(text=batch["target"],
+                       text_pair=batch["context"],
+                       add_special_tokens=True, 
+                       truncation=True, 
+                       max_length=512, 
+                       padding='max_length', 
+                       return_attention_mask=True)
+
+
 def yuetal_data_preprocess(gold_data_path, silver_data_path):
     """
     gold_data_path: path to gold jsonl data file
@@ -29,12 +54,6 @@ def yuetal_data_preprocess(gold_data_path, silver_data_path):
     silver_df = load_data_file(silver_data_path)
     
     df = pd.concat([gold_df, silver_df])
-    
-    # Combine context and target
-    contexts = df['context'].values
-    targets = df['target'].values
-    df['text'] = list(map(lambda x,y: str(x) + ' </s> ' + str(y), contexts, targets))
-    df = df.drop(columns=['context', 'target'])
     
     # Binarize and cast label to int
     df['label'] = list(map(lambda x: 0 if int(x) == 1 or int(x) == 0 else 1, df['label']))
