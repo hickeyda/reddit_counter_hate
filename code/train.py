@@ -1,28 +1,14 @@
 import os
 
 import torch
-from torch.utils.data import DataLoader, RandomSampler, SequentialSampler
 import pandas as pd
-import json
-from datasets import load_dataset, DatasetDict, Dataset
 
-from transformers import RobertaTokenizer
 from transformers import Trainer, TrainingArguments
 from transformers import AutoModelForSequenceClassification
-from transformers import Trainer
 from sklearn.metrics import accuracy_score, f1_score
 
-from helper import yuetal_data_preprocess, extract_hidden_states, upsample, tokenize
-
-def load_data_file(path):
-    lines_list = []
-    with open(path, 'r') as f:
-        for line in f:
-            lines_list.append(json.loads(line))
-
-    df = pd.DataFrame(lines_list)
-    
-    return df
+DEV = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+MODEL_CKPT = "roberta-base"
 
 def compute_metrics(pred):
     labels = pred.label_ids
@@ -31,45 +17,22 @@ def compute_metrics(pred):
     acc = accuracy_score(labels, preds)
     return {"accuracy": acc, "f1": f1}
 
-DEV = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-YU_DATA_PATH = '../reference/counter_context/data'
-RETRAIN = True
-
 def main():
-    if RETRAIN == False and \
-        (os.path.exists("./train_encoded.pt") and os.path.exists("./val_encoded.pt")):
-        train_encoded = torch.load("train_encoded.pt")
-        val_encoded = torch.load("val_encoded.pt")
-    else:
-        train_df = yuetal_data_preprocess(YU_DATA_PATH + '/gold/train.jsonl', 
-                                        YU_DATA_PATH + '/silver/train.jsonl')
-        val_df = yuetal_data_preprocess(YU_DATA_PATH + '/gold/val.jsonl', 
-                                        YU_DATA_PATH + '/silver/val.jsonl')
-
-        train_df = upsample(train_df)
-        
-        train_ds = Dataset.from_pandas(train_df)
-        val_ds = Dataset.from_pandas(val_df)
-        
-        train_encoded = train_ds.map(tokenize, batched=True, batch_size=None)
-        val_encoded = val_ds.map(tokenize, batched=True, batch_size=None)
-        
-        # Save the hidden state
-        torch.save(train_encoded, "train_encoded.pt")
-        torch.save(val_encoded, "val_encoded.pt")
+    print("------------------- Data Loading -------------------")
+    train_encoded = torch.load("train_encoded.pt")
+    val_encoded = torch.load("val_encoded.pt")
     
     train_encoded.set_format("torch", columns=["input_ids", "attention_mask", 
                                             "label"])
     val_encoded.set_format("torch", columns=["input_ids", "attention_mask", 
                                             "label"])
         
-    model_ckpt = "roberta-base"
-    model = AutoModelForSequenceClassification.from_pretrained("roberta-base", 
+    model = AutoModelForSequenceClassification.from_pretrained(MODEL_CKPT, 
                                                             num_labels=2)
 
-    batch_size = 64
+    batch_size = 8
     logging_steps = len(train_encoded) // batch_size
-    model_name = model_ckpt + "-finetune-2-class"
+    model_name = MODEL_CKPT + "-finetune-2-class"
     training_args = TrainingArguments(output_dir=model_name,
                                     num_train_epochs=10,
                                     learning_rate=2e-5,
