@@ -6,29 +6,11 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from helper import yuetal_data_preprocess, extract_hidden_states, upsample, tokenize
-
-from datasets import Dataset
-import pandas as pd
 import numpy as np
-import os
-from tqdm import tqdm
-
-import torch.optim as optim
 
 from torch.utils.data import DataLoader
 
-from transformers import AutoModel, RobertaTokenizer
-
-from sklearn.metrics import accuracy_score, f1_score, roc_auc_score
-
-from sklearn.linear_model import LogisticRegression
-
 DEV = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-YU_DATA_PATH = '../counter_context/data'
-RETRAIN = False
-
-
 
 class CounterHateNN(nn.Module):
 
@@ -341,10 +323,8 @@ def my_collate_fn(batch):
 
 
 def main():
-    if RETRAIN == False and \
-        (os.path.exists("./train_hidden.pt") and os.path.exists("./val_hidden.pt")):
-        train_hidden = torch.load("train_hidden.pt")
-        val_hidden = torch.load("val_hidden.pt")
+    train_hidden = torch.load("train_hidden.pt")
+    val_hidden = torch.load("val_hidden.pt")
 	
     train_loader = DataLoader(train_hidden, batch_size=64, shuffle=True, collate_fn=my_collate_fn)
     val_loader = DataLoader(val_hidden, batch_size=64, collate_fn=my_collate_fn)
