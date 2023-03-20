@@ -71,7 +71,7 @@ def data_preprocess(data_set, file_name,
     ds = Dataset.from_pandas(df)
     tokens = ds.map(tokenize, batched=True, batch_size=None)
     tokens_fn = data_set + '_' + new_file_name + "_tokens.pt"
-    if not os.path.exists(tokens_fn) and overwrite == True:
+    if not os.path.exists(tokens_fn) or overwrite == True:
         torch.save(tokens, tokens_fn)
     
     # Extract hidden states
