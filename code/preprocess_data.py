@@ -6,6 +6,7 @@ import torch
 import numpy as np
 import os
 import json
+import random
 
 import torch
 
@@ -46,7 +47,8 @@ def data_preprocess(data_set, file_name,
                     num_label=2, 
                     output_hidden_states=True,
                     overwrite=False,
-                    file_type='jsonl'):
+                    file_type='jsonl',
+                    null_ratio=0.0):
     """
     gold_data_path: path to gold jsonl data file
     silver_data_path: path to silver jsonl data file
@@ -66,6 +68,12 @@ def data_preprocess(data_set, file_name,
     if upsampling:
         new_file_name = "upsample_" + new_file_name
         df = upsample(df)
+    
+    # Inject null contexts
+    if null_ratio != 0.0:
+        new_file_name = "null_context_" + new_file_name
+        null_indices = random.sample(list(range(len(df))), int(null_ratio * len(df)))
+        df['context'].update(pd.Series("", index=null_indices))
     
     # Tokenize
     ds = Dataset.from_pandas(df)
@@ -126,10 +134,10 @@ def main():
     data_preprocess(data_set="silver", file_name="train", upsampling=True, num_label=2)
     data_preprocess(data_set="silver", file_name="val", upsampling=False, num_label=2)
     
-    data_preprocess(data_set="gold", file_name="train", upsampling=False, num_label=3)
-    data_preprocess(data_set="gold", file_name="val", upsampling=False, num_label=3)
-    data_preprocess(data_set="silver", file_name="train", upsampling=False, num_label=3)
-    data_preprocess(data_set="silver", file_name="val", upsampling=False, num_label=3)
+    data_preprocess(data_set="gold", file_name="train", upsampling=False, num_label=3, null_ratio=0.25, output_hidden_states=False)
+    data_preprocess(data_set="gold", file_name="val", upsampling=False, num_label=3, null_ratio=0.25, output_hidden_states=False)
+    data_preprocess(data_set="silver", file_name="train", upsampling=False, num_label=3, null_ratio=0.25, output_hidden_states=False)
+    data_preprocess(data_set="silver", file_name="val", upsampling=False, num_label=3, null_ratio=0.25, output_hidden_states=False)
     
 if __name__ == "__main__":
     main()
