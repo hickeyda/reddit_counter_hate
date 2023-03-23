@@ -1,18 +1,15 @@
-import os
-
 import torch
 import pandas as pd
 
-from datasets import concatenate_datasets
+from datasets import concatenate_datasets, Dataset
 
 from transformers import Trainer, TrainingArguments
 from transformers import AutoModelForSequenceClassification
 from sklearn.metrics import accuracy_score, f1_score
-from tqdm import tqdm
 import numpy as np
 
 DEV = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-MODEL_CKPT = "MODEL" #Use Derek's target only model trained on just gold
+MODEL_CKPT = "model-4-base"
 SEED = 123
 
 def compute_metrics(pred):
@@ -94,54 +91,63 @@ def train_3_label_stance_base():
     print("------------------- Training with gold data -------------------")
     trainer.train()
 
-def predict_and_add_to_train(model, trainer, train_set, unlabeled_data, threshold):
+def predict_and_add_to_train(model, trainer, train_tokens, unlabeled_tokens, threshold):
     converged = False
     convergence_limit = 50
 
     model.eval()
 
-    unlabeled_pred = trainer.predict(unlabeled_data) # Make predictions for unlabeled data
+    pred_logits = torch.Tensor(trainer.predict(unlabeled_tokens).predictions)
+    pred_probs = torch.nn.functional.softmax(pred_logits, dim=-1)
+    max_probs = torch.max(pred_probs, dim=1).numpy()
+    labels = np.argmax(max_probs, axis=1) #label 0 or 1
 
-    train_idx = np.where(np.max(unlabeled_pred, axis=1) > threshold)[0] # get indices of high confidence predictions
-    unlabeled_idx = np.where(np.max(unlabeled_pred, axis=1) <= threshold)[0] # get indices of not high confidence predictions
-
-    labels = np.argmax(unlabeled_pred, axis=1) #label 0 or 1
-
-    train_labels = labels[train_idx] #Specify we want labels of new train data
-
-    new_unlabeled = unlabeled_data[unlabeled_idx] #data that is still unlabeled
-
-    add_to_train_set = (unlabeled_data[train_idx], train_labels) # make a dataset of labeled data to add to training (not sure exact command)
-
-    new_unlabeled = torch.stack(new_unlabeled) # Create a new unlabeled dataset that can be evaluated
-    train_set.append(add_to_train_set) # Add the new training data. I'm not sure the exact command for this
-
-    if len(train_labels) < convergence_limit: # if only a certain number of predictions are added to training data
+    # Update train tokens
+    confident_pred_indices = np.where(max_probs > threshold)
+    # new_unlabeled = torch.Tensor(unlabeled_tokens[~confident_pred_indices])
+    
+    pseudo_train_tokens = Dataset.from_dict(unlabeled_tokens[confident_pred_indices])
+    pseudo_train_labels = labels[confident_pred_indices]
+    pseudo_train_tokens.add_column("label", pseudo_train_labels)
+    
+    train_tokens = concatenate_datasets(train_tokens, pseudo_train_tokens)
+    
+    # Update unlabeled tokens
+    remain_indices = []
+    for i in range(len(unlabeled_tokens)):
+        if i not in confident_pred_indices:
+            remain_indices.append(i)
+    
+    unlabeled_tokens = Dataset.from_dict(unlabeled_tokens[remain_indices])
+    
+    # if only a certain number of predictions are added to training data
+    if len(confident_pred_indices) < convergence_limit:
         converged = True
 
-    print(f"{len(train_labels)} points added to training, {len(new_unlabeled)} remaining")
+    print(f"{len(confident_pred_indices)} points added to training, {len(unlabeled_tokens)} remaining")
 
-    return new_unlabeled, train_set, converged
+    return train_tokens, unlabeled_tokens, converged
     
 def main():
     print("------------------- Data Loading -------------------")
-    train_encoded = torch.load("train_encoded.pt") #use just gold data, binary label
-    val_encoded = torch.load("val_encoded.pt") #use just gold data, binary label
-    unlabeled_encoded = torch.load(UNLABELED_DATA_PATH) #load in unlabeled data
+    train_tokens = torch.load("gold_2-label_train_tokens.pt") #use just gold data, binary label
+    val_tokens = torch.load("gold_2-label_val_tokens.pt") #use just gold data, binary label
+    unlabeled_tokens = torch.load("combined_subreddit.pt") #load in unlabeled data
     
-    train_encoded.set_format("torch", columns=["input_ids", "attention_mask", 
+    train_tokens.set_format("torch", columns=["input_ids", "attention_mask", 
                                             "label"])
-    val_encoded.set_format("torch", columns=["input_ids", "attention_mask", 
+    val_tokens.set_format("torch", columns=["input_ids", "attention_mask", 
                                             "label"])
+    unlabeled_tokens.set_format("torch", columns=["input_ids", "attention_mask"])
         
     model = AutoModelForSequenceClassification.from_pretrained(MODEL_CKPT, 
                                                             num_labels=2)
 
-    batch_size = 64
-    logging_steps = len(train_encoded) // batch_size
-    model_name = MODEL_CKPT + "-finetune-2-class"
+    batch_size = 8
+    logging_steps = len(train_tokens) // batch_size
+    model_name = MODEL_CKPT + "-self-train-2-class"
     training_args = TrainingArguments(output_dir=model_name,
-                                    num_train_epochs=3, #set epochs to something low since you'll be training a lot? maybe?
+                                    num_train_epochs=1, #set epochs to something low since you'll be training a lot? maybe?
                                     learning_rate=2e-5,
                                     per_device_train_batch_size=batch_size,
                                     per_device_eval_batch_size=batch_size,
@@ -151,39 +157,28 @@ def main():
                                     logging_steps=logging_steps,
                                     push_to_hub=False, 
                                     log_level="error",
-                                    save_total_limit = 1)
+                                    save_strategy="no")
+    
+    print()
 
-    trainer = Trainer(model=model, args=training_args, 
-                    compute_metrics=compute_metrics,
-                    train_dataset=train_encoded,
-                    eval_dataset=val_encoded)
-    
-    converged = False
-    
     print("------------------- Training -------------------")
-
     i = 0
-
-    unlabeled_encoded, train_encoded, converged = predict_and_add_to_train(model, trainer, train_encoded, unlabeled_encoded, 0.8)
-    
-
+    converged = False
     while not converged:
         print("Step", i)
 
         trainer = Trainer(model=model, args=training_args, #update trainer with new data
                 compute_metrics=compute_metrics,
-                train_dataset=train_encoded,
-                eval_dataset=val_encoded)
+                train_dataset=train_tokens,
+                eval_dataset=val_tokens)
         trainer.train()
-
-        #trainer.save_model(f'./self_train_{i}')
-
-        #model = AutoModelForSequenceClassification.from_pretrained(f'./self_train_{i}', 
-        #                                                    num_labels=2)
         
-        unlabeled_encoded, train_encoded, converged = predict_and_add_to_train(model, trainer, train_encoded, unlabeled_encoded, 0.8)
+        train_tokens, unlabeled_tokens, converged = \
+            predict_and_add_to_train(model, trainer, train_tokens, unlabeled_tokens, 0.8)
 
         i += 1
+        
+    trainer.save_model("self_train")
 
     
 
